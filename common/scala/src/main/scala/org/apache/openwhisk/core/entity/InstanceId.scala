@@ -53,7 +53,7 @@ case class InvokerInstanceId(val instance: Int,
   override val toJson: JsValue = InvokerInstanceId.serdes.write(this)
 }
 
-case class ControllerInstanceId(asString: String) extends InstanceId {
+case class ControllerInstanceId(asString: String, controllerNodeName: String = "", loadBalancerInvokerDistribution: String = "default") extends InstanceId {
   validate(asString)
   override val instanceType = "controller"
 

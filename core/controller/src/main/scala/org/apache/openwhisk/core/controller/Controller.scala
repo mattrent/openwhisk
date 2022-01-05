@@ -250,7 +250,9 @@ object Controller {
 
     // if deploying multiple instances (scale out), must pass the instance number as the
     require(args.length >= 1, "controller instance required")
-    val instance = ControllerInstanceId(args(0))
+    val controllerNodeName = if (args.length > 1) args(1) else ""
+    val loadBalancerInvokerDistribution = if (args.length > 2) args(2) else "default"
+    val instance = ControllerInstanceId(args(0), controllerNodeName, loadBalancerInvokerDistribution)
 
     def abort(message: String) = {
       logger.error(this, message)

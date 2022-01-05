@@ -1,0 +1,16 @@
+default:
+  - controller: "*"
+  - workers: "*"
+    strategy: random
+    invalidate:
+      - max_concurrent_invocations: 100
+      - capacity_used: 50
+mongoDB:
+  - controller: "azureworker2"
+    topology_tolerance: "all"
+  - workers: "*"
+    strategy: random
+    invalidate:
+      - max_concurrent_invocations: 100
+      - capacity_used: 50
+  - followup: 'default'
