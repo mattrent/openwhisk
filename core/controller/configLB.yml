@@ -1,16 +1,30 @@
 default:
-  - controller: "*"
-  - workers: "*"
-    strategy: random
-    invalidate:
-      - max_concurrent_invocations: 100
-      - capacity_used: 50
+  blocks:
+    - controller: "*"
+      workers:
+      - "kube-node3"
+      - "kube-node2"
+      strategy: platform
+      invalidate:
+        - max_concurrent_invocations: 100
+        - capacity_used: 50
+    - workers:
+      - "kube-node3"
+      - "kube-node2"
+      strategy: random
+    - workers:
+      - "kube-node2"
+  strategy: "random"
 mongoDB:
-  - controller: "azureworker2"
-    topology_tolerance: "all"
-  - workers: "*"
-    strategy: random
-    invalidate:
-      - max_concurrent_invocations: 100
-      - capacity_used: 50
-  - followup: 'default'
+  blocks:
+    - controller: "kube-node4"
+      workers: "*"
+      topology_tolerance: "all"
+      strategy: random
+    - controller: "kube-node5"
+      workers:
+        - "kube-node3"
+      topology_tolerance: "none"
+      strategy: platform
+  strategy: random
+  followup: default
