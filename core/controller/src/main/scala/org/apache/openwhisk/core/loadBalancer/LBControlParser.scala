@@ -7,7 +7,15 @@ import org.yaml.snakeyaml.Yaml
 
 import scala.collection.JavaConverters._
 
+case class InvokerLabel(
+  label: String,
+  strategy: Option[String],
+  maxCapacity: Option[Int],
+  maxConcurrentInvocations: Option[Int]
+)
+
 sealed trait Invokers
+case class InvokerLabels(labels: List[InvokerLabel]) extends Invokers
 case class InvokerList(names: List[String]) extends Invokers
 case class All() extends Invokers
 
@@ -23,20 +31,29 @@ case class NoneTolerance() extends TopologyTolerance
 // Oggetto per ogni insieme di workers che contiene gli workers
 // strategia associata e invalidate (capacity e max concs)
 case class InvokersSetSettings(
-  workers: Invokers, strategy: Option[String],
+  workers: Invokers) {
+    override def toString: String = s"${workers}"
+}
+
+case class BlockSettings(
+  controller: ControllerSetting,
+  topology_tolerance: TopologyTolerance,
+  strategy: Option[String],
   maxCapacity: Option[Int],
-  maxConcurrentInvocations: Option[Int]) {
-    override def toString: String = s"${workers}, strat: ${strategy}, maxC ${maxCapacity}, maxCI ${maxConcurrentInvocations}"
+  maxConcurrentInvocations: Option[Int],
+  invokersSettings: List[InvokersSetSettings]
+) {
+  override def toString: String = s"${controller}, topology_tolerance: ${topology_tolerance}, invokerSettings: ${invokersSettings}, strat: ${strategy}, maxC ${maxCapacity}, maxCI ${maxConcurrentInvocations}"
 }
 
 // Oggetto per ogni function tag che contiene tutte le impostazioni
 case class TagSettings(tag: String,
-                       invokersSettings: List[InvokersSetSettings],
+                       blockSettings: List[BlockSettings],
                        followUp : Option[String],
-                       controller: ControllerSetting,
-                       topology_tolerance: TopologyTolerance)
+                       strategy : Option[String])
 {
-  override def toString: String = s"Tag Settings for tag: $tag. With ${invokersSettings.length} workers and ${followUp} followup. ${invokersSettings}"
+  // override def toString: String = s"Tag Settings for tag: $tag. With ${blockSettings.length} blocks, ${strategy} strategy and ${followUp} followup. ${blockSettings}"
+  override def toString: String = s"Tag Settings for tag: $tag. With ${strategy} strategy and ${followUp} followup. ${blockSettings}"
 }
 
 // Oggetto per tutte le impostazioni di un file smart lb config yml
@@ -63,79 +80,109 @@ object LBControlParser {
     }
   }
 
-  private def parseInvokersSettings(invokerSettings: Map[String, Any]) : InvokersSetSettings = {
-
-    logIntoContainer(s"${invokerSettings("workers")}")
-    val invokersList = invokerSettings("workers") match {
-      case "*" => All()
-      case l => InvokerList(l.asInstanceOf[util.ArrayList[String]].asScala.toList)
-    }
-    logIntoContainer(s"$invokersList")
-
-    val strategy = invokerSettings.get("strategy").asInstanceOf[Option[String]]
-
-    logIntoContainer(s"$strategy")
-
-    val invalidate: Map[String, Int] = invokerSettings.get("invalidate") match {
+  private def parseInvalidate(invalidateSettings: Option[Any]): Map[String, Int] = {
+    invalidateSettings match {
       case Some("overload") => Map()
       case l => l.asInstanceOf[Option[util.ArrayList[util.HashMap[String, Int]]]] match {
         case None => Map()
         case Some(l) => l.asScala.toList.flatMap(m => m.asScala.toMap).toMap
       }
     }
+  }
 
-    logIntoContainer(s"$invalidate")
+  private def parseInvokersSettings(invokerSettings: Option[Any]) : InvokersSetSettings = {
+    logIntoContainer("PARSING INVOKERS")
+    logIntoContainer(s"$invokerSettings")
 
-    InvokersSetSettings(invokersList, strategy, invalidate.get("capacity_used"), invalidate.get("max_concurrent_invocations"))
+    val invokersList = invokerSettings match {
+      case None => All()
+      case Some("*") => All()
+      case Some(l) =>
+        logIntoContainer(s"$l")
+        val list = l.asInstanceOf[util.ArrayList[Any]].asScala.toList
+        logIntoContainer(s"$list")
+        if (list(0).isInstanceOf[String])
+          InvokerList(list.asInstanceOf[List[String]])
+        else
+          InvokerLabels(
+            list.map(
+              e => {
+                val _e = e.asInstanceOf[util.HashMap[String, String]].asScala.toMap
+                val _invalidate: Map[String, Int] = parseInvalidate(_e.get("invalidate"))
+                InvokerLabel(_e.getOrElse("label", "*"), _e.get("strategy"), _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
+              }
+            )
+          )
+
+    }
+    logIntoContainer(s"$invokersList")
+
+    InvokersSetSettings(invokersList)
+  }
+
+  private def parseBlockSettings(blockSettings: Any) : BlockSettings = {
+    logIntoContainer("PARSING BLOCK")
+    val settings = blockSettings.asInstanceOf[util.HashMap[String, Any]].asScala.toMap
+
+    val controllerName: ControllerSetting = settings.get("controller") match {
+      case None => AllControllers()
+      case Some("*") => AllControllers()
+      case Some(s) => ControllerName(s.toString)
+    }
+
+    val toleranceSettings: TopologyTolerance = settings.get("topology_tolerance") match {
+      case None => AllTolerance()
+      case Some("all") => AllTolerance()
+      case Some("none") => NoneTolerance()
+      case Some("same") => SameTolerance()
+      case _ => AllTolerance()
+    }
+
+    val strategy = settings.get("strategy")
+    val strategySettings: Option[String] = strategy match {
+      case None => None
+      case Some(s) => Some(s.toString)
+    }
+
+    val invalidate: Map[String, Int] = parseInvalidate(settings.get("invalidate"))
+
+    val invokerSettings = parseInvokersSettings(settings.get("workers"))
+
+    BlockSettings(controllerName, toleranceSettings, strategySettings, invalidate.get("capacity_used"), invalidate.get("max_concurrent_invocations"), invokerSettings)
   }
 
   private def parseTagSettings(tag : (String, Any)) : (String, TagSettings) = {
     val tagName = tag._1
+    logIntoContainer(s"PARSING TAG $tagName")
 
-    val settings: List[Map[String, Any]] = tag._2.asInstanceOf[util.ArrayList[util.HashMap[String, Any]]].asScala.toList.map(_.asScala.toMap)
+    val settings: Map[String, Any] = tag._2.asInstanceOf[util.HashMap[String, Any]].asScala.toMap
 
     logIntoContainer(s"${tag._2}")
 
-    val (invokersControllerSettings: List[Map[String, Any]], followupList: List[Map[String, Any]]) = settings.partition(!_.contains("followup"))
+    val blocks: List[Any] = settings.get("blocks") match {
+      case None => List[Any]()
+      case Some(b) => b.asInstanceOf[util.ArrayList[Any]].asScala.toList
+    }
+    val blockSettings: List[BlockSettings] = blocks.map(parseBlockSettings)
 
-    val (invokersSettings: List[Map[String, Any]], controllerSettings: List[Map[String, Any]]) = invokersControllerSettings.partition(!_.contains("controller"))
+    val followUp = settings.get("followup")
+    val strategy = settings.get("strategy")
 
-    val fl = followupList.map(m=>m.get("followup"))
-
-    val followUp: Option[String] = fl match {
-      case List() => None
-      case x :: _ => if (x.isDefined) Some(x.get.toString) else None
+    val followUpSettings: Option[String] = followUp match {
+      case None => None
+      case Some(s) => Some(s.toString)
     }
 
-    val (controllerName: ControllerSetting, toleranceSettings: TopologyTolerance) =
-      controllerSettings match {
-        case List() => (AllControllers, None)
-        case x :: _ =>
-            val controllerString = x.get("controller")
-            val toleranceString = x.get("topology_tolerance")
-            val controller: ControllerSetting = controllerString match {
-              case None => AllControllers()
-              case Some(s) =>
-                val t = s.toString
-                if (t == "*") AllControllers()
-                else ControllerName(t)
-            }
-            val tolerance: TopologyTolerance = toleranceString match {
-              case None => AllTolerance()
-              case Some(s) =>
-                    val t = s.toString
-                    if (t == "*") AllTolerance()
-                    else if (t == "same") SameTolerance()
-                    else if (t == "none") NoneTolerance()
-                    else AllTolerance()
-            }
-          (controller, tolerance)
-      }
+    val strategySettings: Option[String] = strategy match {
+      case None => None
+      case Some(s) => Some(s.toString)
+    }
 
-    logIntoContainer(s"$controllerName")
-    logIntoContainer(s"$toleranceSettings")
+    blockSettings.foreach(b => logIntoContainer(s"$b"))
+    logIntoContainer(s"$followUp")
+    logIntoContainer(s"$strategy")
 
-    tagName -> TagSettings(tagName, invokersSettings.map(parseInvokersSettings), followUp, controllerName, toleranceSettings)
+    tagName -> TagSettings(tagName, blockSettings, followUpSettings, strategySettings)
   }
 
   def parseConfigurableLBSettings(configurationYAMLText : String) : ConfigurableLBSettings = {
