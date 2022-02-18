@@ -17,6 +17,7 @@ case class InvokerLabel(
 sealed trait Invokers
 case class InvokerLabels(labels: List[InvokerLabel]) extends Invokers
 case class InvokerList(names: List[String]) extends Invokers
+//TODO: remove All() => All() is a case of *label, where label is ""
 case class All() extends Invokers
 
 sealed trait ControllerSetting
@@ -28,12 +29,6 @@ case class AllTolerance() extends TopologyTolerance
 case class SameTolerance() extends TopologyTolerance
 case class NoneTolerance() extends TopologyTolerance
 
-// Oggetto per ogni insieme di workers che contiene gli workers
-// strategia associata e invalidate (capacity e max concs)
-case class InvokersSetSettings(
-  workers: Invokers) {
-    override def toString: String = s"${workers}"
-}
 
 case class BlockSettings(
   controller: ControllerSetting,
@@ -41,7 +36,7 @@ case class BlockSettings(
   strategy: Option[String],
   maxCapacity: Option[Int],
   maxConcurrentInvocations: Option[Int],
-  invokersSettings: List[InvokersSetSettings]
+  invokersSettings: Invokers
 ) {
   override def toString: String = s"${controller}, topology_tolerance: ${topology_tolerance}, invokerSettings: ${invokersSettings}, strat: ${strategy}, maxC ${maxCapacity}, maxCI ${maxConcurrentInvocations}"
 }
@@ -64,6 +59,7 @@ case class ConfigurableLBSettings(settings : Map[String, TagSettings]) {
   def getTagSettings(tag : String): Option[TagSettings] = settings.get(tag)
 
 }
+
 
 object LBControlParser {
 
@@ -90,7 +86,7 @@ object LBControlParser {
     }
   }
 
-  private def parseInvokersSettings(invokerSettings: Option[Any]) : InvokersSetSettings = {
+  private def parseInvokersSettings(invokerSettings: Option[Any]) : Invokers = {
     logIntoContainer("PARSING INVOKERS")
     logIntoContainer(s"$invokerSettings")
 
@@ -117,7 +113,7 @@ object LBControlParser {
     }
     logIntoContainer(s"$invokersList")
 
-    InvokersSetSettings(invokersList)
+    invokersList
   }
 
   private def parseBlockSettings(blockSettings: Any) : BlockSettings = {

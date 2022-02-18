@@ -23,10 +23,12 @@ mongoDB:
       strategy: random
     - controller: "kube-node5"
       workers:
-      - label: "*kube-node3"
+      - label: "*kube-label3"
         strategy: random
-      - label: "*kube-node2"
+      - label: "*kube-label2"
         strategy: platform
+      - label: "*"
+        strategy: random
       topology_tolerance: "none"
       strategy: platform
   strategy: random
