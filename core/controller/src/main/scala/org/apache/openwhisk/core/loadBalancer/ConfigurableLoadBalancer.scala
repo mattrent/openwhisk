@@ -4,6 +4,8 @@ import akka.actor.ActorRef
 import akka.actor.ActorRefFactory
 import akka.actor.{Actor, ActorSystem, Props}
 import akka.cluster.ClusterEvent._
+import akka.cluster.pubsub.DistributedPubSub
+import akka.cluster.pubsub.DistributedPubSubMediator.{Subscribe, SubscribeAck, Publish}
 import akka.cluster.{Cluster, Member, MemberStatus}
 import akka.http.scaladsl.model.StatusCodes.BadRequest
 import akka.management.scaladsl.AkkaManagement
@@ -65,9 +67,13 @@ class ConfigurableLoadBalancer(
    * [[ConfigurableLoadBalancerState.updateInvokers]] and [[ConfigurableLoadBalancerState.updateCluster]]
    * are called exclusive of each other and not concurrently.
    */
+
+  val mediator = DistributedPubSub(actorSystem).mediator
+
   private val monitor = actorSystem.actorOf(Props(new Actor {
     override def preStart(): Unit = {
       cluster.foreach(_.subscribe(self, classOf[MemberEvent], classOf[ReachabilityEvent]))
+      mediator ! Subscribe("refresh", self)
     }
 
     // all members of the cluster that are available
@@ -95,13 +101,16 @@ class ConfigurableLoadBalancer(
           case UnreachableMember(member) => availableMembers - member
           case _                         => availableMembers
         }
-
         schedulingState.updateCluster(availableMembers.size)
 
-	  // the loadbalancer configuration has been updated
-      case ConfigurationUpdated(newConfig) =>
-		    schedulingState.updateConfigurableLBSettings(newConfig)
 
+      case ConfigurationUpdated(newConfig) =>
+        logging.info(this, "ConfigurableLB: Configuration update request received.")
+        schedulingState.updateConfigurableLBSettings(newConfig)
+
+
+      case SubscribeAck(Subscribe("refresh", None, `self`)) =>
+        logging.info(this, "ConfigurableLB: subscribed to refresh updates.")
     }
   }))
 
@@ -113,7 +122,7 @@ class ConfigurableLoadBalancer(
       sendActivationToInvoker,
       Some(monitor))
 
-  updateConfig("/data/configLB.yml", monitor)
+  updateConfig("/data/configLB.yml")
 
 	/** Loadbalancer interface methods */
   override def invokerHealth(): Future[IndexedSeq[InvokerHealth]] = Future.successful(schedulingState.invokers)
@@ -171,7 +180,7 @@ class ConfigurableLoadBalancer(
 
 
 
-	if (forceRefresh == true) updateConfig("/data/configLB.yml", monitor)
+	if (forceRefresh == true) updateConfig("/data/configLB.yml")
 	else logging.info(this, s"ConfigurableLB: No configuration refresh was requested, using old config")
 
 	if (tag != "default" && tag != invokeTag) {
@@ -287,12 +296,12 @@ class ConfigurableLoadBalancer(
 	 text
  }
 
- def updateConfig(fileName: String, monitor: ActorRef): Unit = {
+ def updateConfig(fileName: String): Unit = {
 	 val configurationText : String = loadConfigText(fileName)
 	 val configurableLBSettings : ConfigurableLBSettings = LBControlParser.parseConfigurableLBSettings(configurationText)
 
      //TODO: currently need to update configuration manually with multiple invocation; send message to all load balancers in cluster using Akka, handle message in monitor
-	 monitor ! ConfigurationUpdated(configurableLBSettings)
+     mediator ! Publish("refresh", ConfigurationUpdated(configurableLBSettings))
  }
 }
 
