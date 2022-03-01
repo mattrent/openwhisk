@@ -17,7 +17,6 @@ case class InvokerLabel(
 sealed trait Invokers
 case class InvokerLabels(labels: List[InvokerLabel]) extends Invokers
 case class InvokerList(names: List[String]) extends Invokers
-//TODO: remove All() => All() is a case of *label, where label is ""
 case class All() extends Invokers
 
 sealed trait ControllerSetting
