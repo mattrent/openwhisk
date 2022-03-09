@@ -111,12 +111,16 @@ class ConfigurableLoadBalancer(
                 logging.info(this, "ConfigurableLB: Configuration update request received.")
                 schedulingState.updateConfigurableLBSettings(newConfig)
 
-            case PropagateInvocation(serializedAction, serializedMsg, serializedTransid) =>
+            case PropagateInvocation(serializedAction, serializedMsg, serializedTransid, policyIndex, actionTag, availableIndexes, selectedController) =>
                 val action = WhiskActionMetaData.serdes.read(serializedAction).toExecutableWhiskAction
                 val msg = ActivationMessage.serdes.read(serializedMsg)
-                val transid = TransactionId.serdes.read(serializedTransid)
-                logging.info(this, s"ConfigurableLB: Received ${msg.action.name};${action.get.annotations};${transid.id} from sender: $sender")
-                sender ! s"${msg.action.name};${action.get.annotations};${transid.id}"
+                implicit val transid = TransactionId.serdes.read(serializedTransid)
+
+                logging.info(this, s"ConfigurableLB: Received ${msg.action.name};${transid.id} from sender: $sender")
+                if (selectedController == controllerInstance.controllerNodeName) {
+                    logging.info(this, s"Publishing invocation from $sender on $self")
+                    sender ! schedulePropagated(action.get, msg, transid, policyIndex, actionTag, availableIndexes)
+                }
 
             case SubscribeAck(Subscribe("refresh", None, `self`)) =>
                 logging.info(this, "ConfigurableLB: subscribed to refresh updates.")
@@ -188,7 +192,6 @@ class ConfigurableLoadBalancer(
         }
 
 
-
         if (forceRefresh == true) updateConfig("/data/configLB.yml")
         else logging.info(this, s"ConfigurableLB: No configuration refresh was requested, using old config")
 
@@ -202,8 +205,6 @@ class ConfigurableLoadBalancer(
             val nodeLabelMap = schedulingState.nodeLabelMap
 
             val configurableLBSettings: ConfigurableLBSettings = schedulingState.configurableLBSettings
-
-            propagateInvocation(action, msg, transid)
 
             logging.info(this, "choosing invoker...")
             val chosen = if (invokersToUse.nonEmpty) {
@@ -222,6 +223,39 @@ class ConfigurableLoadBalancer(
                     configurableLBSettings,
                     controllerInstance,
                     policyIndex)(logging, transid)
+                  /*
+                    if no invoker is found, we try to propagate the invocation according to the block settings;
+                    this can still return None, causing the overall invocation to fail
+                   */
+                  .orElse({
+                      logging.info(this, "ConfigurableLB: no invoker found, propagating invocation")
+                      propagateInvocation(action, msg, transid, policyIndex, actionTag, None)
+                  })
+                  .orElse({
+                      logging.info(this, "ConfigurableLB: propagation failed, trying followup options")
+                      /* if no tag settings are defined for the given tag, followUp is default;
+                        if they are defined, but no followUp is given, followUp is default;
+                        if they are defined, and followUp is specified, we use the given string
+                       */
+                      /* this is None only if no tag settings are found */
+                      val followUp: Option[String] = configurableLBSettings.getTagSettings(actionTag).map(_.followUp.getOrElse("default"))
+                      followUp match {
+                          case None | Some("default") =>
+                              logging.info(this, s"ConfigurableLB: Found followUp $followUp, trying with default")
+                              /* policyIndex is -1 because no index has been used yet;
+                                propagateInvocation will fail if no tagSettings are defined for the "default" tag
+                               */
+                              propagateInvocation(action, msg, transid, -1, "default", None)
+                          case Some("fail") =>
+                              logging.info(this, s"ConfigurableLB: No compatible invokers found and followup is fail. Can't invoke action!")
+                              None
+                          case Some(s) =>
+                              logging.info(this, s"ConfigurableLB: Wrong followup information ${s}, failing")
+                              None
+                      }
+
+                  })
+
                 invoker.foreach {
                     case (_, true) =>
                         val metric =
@@ -259,16 +293,6 @@ class ConfigurableLoadBalancer(
                   sendActivationToInvoker(messageProducer, msg, invoker).map(_ => activationResult)
               }
               .getOrElse {
-                  /* TODO: add extra publish method to be called when an invocation is propagated
-                      this way we can handle the invocation promise and forward the result to the previous controller in the "chain"
-                      and the actual response to nginx is given by the first contacted controller
-                      while the activationResult is collected by the last one, and forwarded up the chain of controllers
-                   */
-                  /*if chosen == None => policy failed, propagate invocation to next policy
-                    check if policies are available
-                    if none available, and this is not a propagated request, fail
-                    if none are available, and this is a propagated request, propagate failure to original sender (this will be in a different method)
-                   */
                   // report the state of all invokers
                   val invokerStates = invokersToUse.foldLeft(Map.empty[InvokerState, Int]) { (agg, curr) =>
                       val count = agg.getOrElse(curr.status, 0) + 1
@@ -291,17 +315,101 @@ class ConfigurableLoadBalancer(
 
 
 
-    def propagateInvocation(action: ExecutableWhiskActionMetaData, msg: ActivationMessage, transid: TransactionId) = {
-        /* TODO: select policy */
-        implicit val timeout = Timeout(action.limits.timeout.duration)
+    def propagateInvocation(action: ExecutableWhiskActionMetaData, msg: ActivationMessage, transid: TransactionId,
+                            policyIndex: Int, actionTag: String, availableIndexes: Option[List[Int]]): Option[(InvokerInstanceId, Boolean)] = {
+        val configurableLBSettings: ConfigurableLBSettings = schedulingState.configurableLBSettings
+        val tagSettings = configurableLBSettings.getTagSettings(actionTag)
 
-        val serializedAction = WhiskActionMetaData.serdes.write(action.toWhiskAction)
-        val serializedMsg = ActivationMessage.serdes.write(msg)
-        val serializedTransid = TransactionId.serdes.write(transid)
+        /* if no tag settings are found, we simply fail (nothing to propagate) */
+        tagSettings.flatMap(ts => {
+            implicit val timeout: Timeout = Timeout(action.limits.timeout.duration)
 
-        val future = mediator ? Publish("invocation", PropagateInvocation(serializedAction, serializedMsg, serializedTransid))
-        val result = Await.result(future, timeout.duration).asInstanceOf[String]
-        logging.info(this, s"Result of action propagation: $result")
+            val serializedAction = WhiskActionMetaData.serdes.write(action.toWhiskAction)
+            val serializedMsg = ActivationMessage.serdes.write(msg)
+            val serializedTransid = TransactionId.serdes.write(transid)
+
+            val strategy = ts.strategy.getOrElse("best-first")
+
+            val indexes: Option[List[Int]] = availableIndexes match {
+                /* if None is given, it means that this is the first call to propagateInvocation, on the first controller */
+                case None =>
+                    val oldIndexes = List.range(0, ts.blockSettings.length)
+                    val idxList = oldIndexes.filter(_ != policyIndex)
+                    if (idxList.length > 0) Some(idxList)
+                    else None
+                case Some(List()) =>
+                    /* no need to proceed further, the invocation cannot be propagated */
+                    None
+                case Some(l) =>
+                    Some(l)
+            }
+
+            indexes.flatMap(idxs => {
+                val nextPolicyIndex: Int = strategy match {
+                    case "best-first" => idxs(0)
+                    case "random" =>
+                        val rand = scala.util.Random
+                        val rIndex = rand.nextInt(idxs.length)
+                        idxs(rIndex)
+                    case _ => idxs(0)
+                }
+                val newIndexes = idxs.filter(_ != nextPolicyIndex)
+                val selectedController = ts.blockSettings(nextPolicyIndex).controller
+
+                selectedController match {
+                    case AllControllers() =>
+                        /* if no controller is required, then we simply schedule on the same node */
+                        schedulePropagated(action, msg, transid, nextPolicyIndex, actionTag, newIndexes)
+                    case ControllerName(controllerName) =>
+                        val future = mediator ? Publish("invocation",
+                            PropagateInvocation(
+                                serializedAction,
+                                serializedMsg,
+                                serializedTransid,
+                                nextPolicyIndex,
+                                actionTag,
+                                newIndexes,
+                                controllerName
+                            )
+                        )
+
+                        Await.result(future, timeout.duration).asInstanceOf[Option[(InvokerInstanceId, Boolean)]]
+
+                }
+            })
+        })
+
+    }
+
+    def schedulePropagated(action: ExecutableWhiskActionMetaData, msg: ActivationMessage, transid: TransactionId,
+                           policyIndex: Int, actionTag: String, availableIndexes: List[Int]): Option[(InvokerInstanceId, Boolean)] = {
+        val isBlackboxInvocation = action.exec.pull
+        val (invokersToUse, stepSizes) =
+            if (!isBlackboxInvocation) (schedulingState.managedInvokers, schedulingState.managedStepSizes)
+            else (schedulingState.blackboxInvokers, schedulingState.blackboxStepSizes)
+
+        val nodeZoneMap = schedulingState.nodeZoneMap
+        val nodeLabelMap = schedulingState.nodeLabelMap
+        val configurableLBSettings: ConfigurableLBSettings = schedulingState.configurableLBSettings
+
+        val chosenInvoker = ConfigurableLoadBalancer.schedule(
+                                action,
+                                msg,
+                                action.limits.concurrency.maxConcurrent,
+                                action.fullyQualifiedName(true),
+                                invokersToUse,
+                                schedulingState.invokerSlots,
+                                action.limits.memory.megabytes,
+                                actionTag,
+                                stepSizes,
+                                nodeZoneMap,
+                                nodeLabelMap,
+                                configurableLBSettings,
+                                controllerInstance,
+                                policyIndex)(logging, transid)
+
+        /* if no invoker is found, we propagate further, until propagateInvocation simply return None */
+        chosenInvoker.orElse(propagateInvocation(action, msg, transid, policyIndex, actionTag, Some(availableIndexes)))
     }
 
     def getTag(annotations: Parameters)(implicit logging: Logging, transId: TransactionId): Option[String] = {
@@ -570,46 +678,15 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
             }
         }
 
-        @tailrec
-        def scheduleBasedOnTagSettings(
-                                        healthyInvokers: IndexedSeq[InvokerHealth],
+        def scheduleBasedOnTagSettings(healthyInvokers: IndexedSeq[InvokerHealth],
                                         sameZoneInvokers: IndexedSeq[InvokerHealth],
-                                        blockSettings: BlockSettings,
-                                        followUp: Option[String],
-                                        defaultFallBack: Option[TagSettings]): Option[(InvokerInstanceId, Boolean)] = {
-            logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings block settings ${blockSettings} and defaultFallback: ${defaultFallBack.isDefined}")
+                                        blockSettings: BlockSettings): Option[(InvokerInstanceId, Boolean)] = {
+            logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings block settings ${blockSettings}")
             val res = scheduleOnSpecifiedBlock(healthyInvokers, sameZoneInvokers, blockSettings)
-            if (res.isDefined) {
+            if (res.isDefined)
                 logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings invoker found! ${res}")
-                res
-            } else {
-                followUp match {
-                    case None | Some("default") =>
-                        defaultFallBack match {
-                            case None => defaultSchedule(action, msg, invokers, sameZoneInvokers, dispatched, stepSizes, None, None)
-                            case Some(ts) =>
-                                //TODO: select default policy based on block strategy
-                                ts.strategy match {
-                                    case None =>
-                                        scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(0), ts.followUp, None)
-                                    case Some("random") =>
-                                        val r = scala.util.Random
-                                        val i = r.nextInt(ts.blockSettings.length)
-                                        scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(i), ts.followUp, None)
-                                    case Some("best-first") =>
-                                        scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(0), ts.followUp, None)
-                                    case _ =>
-                                        scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(0), ts.followUp, None)
-                                }
-                        }
-                    case Some("fail") =>
-                        logging.info(this, s"No compatible invokers found and followup is fail. Can't invoke action!")
-                        None
-                    case Some(s) =>
-                        logging.info(this, s"Wrong followup information ${s}, failing.")
-                        None
-                }
-            }
+
+            res
         }
 
         val tagSettings: Option[TagSettings] = configurableLBSettings.getTagSettings(tag)
@@ -630,7 +707,8 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                             logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
                             defaultSchedule(action, msg, invokers, sameZoneInvokers, dispatched, stepSizes, None, None)
                         case Some(ts) =>
-                            scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex), ts.followUp, None)
+                            /* if a default tag is defined, we can simply return None and have the publish() method handle the default invocation (and potential propagation) */
+                            None
                     }
                 case Some(ts) =>
                     logging.info(this, s"ConfigurableLB tagSettings = ${tagSettings}")
@@ -638,22 +716,22 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                     ts.blockSettings(policyIndex).controller match {
                         case AllControllers() =>
                             logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
-                            scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex), ts.followUp, defaultSettings)
+                            scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
 
                         case ControllerName(name) =>
                             if (name == controllerInstance.controllerNodeName) {
                                 logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
-                                scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex), ts.followUp, defaultSettings)
+                                scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
                             } else {
                                 ts.blockSettings(0).topology_tolerance match {
                                     case AllTolerance() =>
                                         logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
-                                        scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex), ts.followUp, defaultSettings)
+                                        scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
                                     case SameTolerance() =>
                                         val originalZone = nodeZoneMap.get(name)
                                         val originalZoneInvokers = filterInvokers(invokers, originalZone, nodeZoneMap)
                                         logging.info(this, s"ConfigurableLB: invokers in requested topology zone: $originalZoneInvokers")
-                                        scheduleBasedOnTagSettings(healthyInvokers, originalZoneInvokers, ts.blockSettings(policyIndex), ts.followUp, defaultSettings)
+                                        scheduleBasedOnTagSettings(healthyInvokers, originalZoneInvokers, ts.blockSettings(policyIndex))
                                     case NoneTolerance() =>
                                         logging.info(this, s"ConfigurableLB: action invoked in a different controller and topology_tolerance is 'none', failing.")
                                         None
@@ -964,7 +1042,10 @@ case class ConfigurableLoadBalancerConfig(managedFraction: Double,
 case class ConfigurationUpdated(newConfig: ConfigurableLBSettings)
 
 /**
- * Custom message to propagate function invocation requests
- * Parameters are the same of the "publish" function
+ * Custom message to propagate function invocation requests.
+ * action, msg and transid parameters are the same of the "publish" function.
+ *
  */
-case class PropagateInvocation(action: JsValue, msg: JsValue, transid: JsValue)
+case class PropagateInvocation(action: JsValue, msg: JsValue, transid: JsValue,
+                               policyIndex: Int, actionTag: String, availableIndexes: List[Int],
+                               selectedController: String)
