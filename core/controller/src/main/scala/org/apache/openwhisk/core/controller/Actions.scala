@@ -244,8 +244,9 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     parameter(
       'blocking ? false,
       'result ? false,
-      'timeout.as[FiniteDuration] ? controllerActivationConfig.maxWaitForBlockingActivation) {
-      (blocking, result, waitOverride) =>
+      'timeout.as[FiniteDuration] ? controllerActivationConfig.maxWaitForBlockingActivation,
+      'nginx_openwhisk_policy_index ? -1) {
+      (blocking, result, waitOverride, nginx_openwhisk_policy_index) =>
         entity(as[Option[JsObject]]) { payload =>
           getEntity(WhiskActionMetaData.resolveActionAndMergeParameters(entityStore, entityName), Some {
             act: WhiskActionMetaData =>
@@ -261,8 +262,13 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
                     .map(_.fields.keySet.forall(key => !actionWithMergedParams.immutableParameters.contains(key)))
                     .getOrElse(true)
 
+                  val ext_payload: Option[JsObject] = payload match {
+                    case None => None
+                    case Some(o) => Some(JsObject(o.fields + ("nginx_openwhisk_policy_index" -> JsNumber(nginx_openwhisk_policy_index))))
+                  }
+
                   if (allowInvoke) {
-                    doInvoke(user, actionWithMergedParams, payload, blocking, waitOverride, result)
+                    doInvoke(user, actionWithMergedParams, ext_payload, blocking, waitOverride, result)
                   } else {
                     terminate(BadRequest, Messages.parametersNotAllowed)
                   }
