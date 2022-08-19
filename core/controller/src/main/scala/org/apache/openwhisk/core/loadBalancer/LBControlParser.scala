@@ -7,37 +7,53 @@ import org.yaml.snakeyaml.Yaml
 
 import scala.collection.JavaConverters._
 
-case class InvokerLabel(
+case class WorkerLabel(
   label: String,
   strategy: Option[String],
   maxCapacity: Option[Int],
   maxConcurrentInvocations: Option[Int]
 )
 
-sealed trait Invokers
-case class InvokerLabels(labels: List[InvokerLabel]) extends Invokers
-case class InvokerList(names: List[String]) extends Invokers
+case class WorkerName(
+  label: String,
+  maxCapacity: Option[Int],
+  maxConcurrentInvocations: Option[Int]
+)
+
+sealed trait Workers
+case class WorkerSet(labels: List[WorkerLabel]) extends Workers
+case class WorkerList(names: List[WorkerName]) extends Workers
 case class All() extends Invokers
 
-sealed trait ControllerSetting
-case class ControllerName(name: String) extends ControllerSetting
-case class AllControllers() extends ControllerSetting
+sealed trait ControllerSettings
+case class ControllerName(name: String) extends ControllerSettings
+case class AllControllers() extends ControllerSettings
 
 sealed trait TopologyTolerance
 case class AllTolerance() extends TopologyTolerance
 case class SameTolerance() extends TopologyTolerance
 case class NoneTolerance() extends TopologyTolerance
 
+/* TODO:
+    - no more "block" keyword
+    - "wrk:" and "set:" for single/multiple workers
+    - no more "*" for all workers (now null is the "all" value)
+    - no more "*" for all controllers (omitting the "controller" value sets it as "all")
+    - tags are now a list
 
+   BlockSettings pretty much the same as before (doesn't need "blocks" keyword, simply a list)
+
+   The returned object must be a map; since tags are a list now, it must be converted from [{"a":{}}, {"b":{}}] to {"a":{}, "b":{}}
+ */
 case class BlockSettings(
   controller: ControllerSetting,
   topology_tolerance: TopologyTolerance,
   strategy: Option[String],
   maxCapacity: Option[Int],
   maxConcurrentInvocations: Option[Int],
-  invokersSettings: Invokers
+  workersSettings: Workers
 ) {
-  override def toString: String = s"${controller}, topology_tolerance: ${topology_tolerance}, invokerSettings: ${invokersSettings}, strat: ${strategy}, maxC ${maxCapacity}, maxCI ${maxConcurrentInvocations}"
+  override def toString: String = s"${controller}, topology_tolerance: ${topology_tolerance}, invokerSettings: ${workersSettings}, strat: ${strategy}, maxC ${maxCapacity}, maxCI ${maxConcurrentInvocations}"
 }
 
 // Oggetto per ogni function tag che contiene tutte le impostazioni
@@ -85,18 +101,18 @@ object LBControlParser {
     }
   }
 
-  private def parseInvokersSettings(invokerSettings: Option[Any]) : Invokers = {
+  private def parseWorkersSettings(workerSettings: Option[Any]) : Invokers = {
     logIntoContainer("PARSING INVOKERS")
-    logIntoContainer(s"$invokerSettings")
+    logIntoContainer(s"$workerSettings")
 
     val invokersList = invokerSettings match {
-      case None => All()
-      case Some("*") => All()
-      case Some(l) =>
-        logIntoContainer(s"$l")
-        val list = l.asInstanceOf[util.ArrayList[Any]].asScala.toList
+      case None => throw new Exception("Invalid configuration file: mandatory workers key missing")
+      case Some(settingsList) =>
+        logIntoContainer(s"$settingsList")
+        val list = settingsList.asInstanceOf[util.ArrayList[Map[Any, Any]]].asScala.toList
         logIntoContainer(s"$list")
-        if (list(0).isInstanceOf[String])
+        val first = list.head
+        if (first)
           InvokerList(list.asInstanceOf[List[String]])
         else
           InvokerLabels(
@@ -119,18 +135,20 @@ object LBControlParser {
     logIntoContainer("PARSING BLOCK")
     val settings = blockSettings.asInstanceOf[util.HashMap[String, Any]].asScala.toMap
 
-    val controllerName: ControllerSetting = settings.get("controller") match {
+    val controllerName: ControllerSettings = settings.get("controller") match {
       case None => AllControllers()
-      case Some("*") => AllControllers()
       case Some(s) => ControllerName(s.toString)
     }
 
-    val toleranceSettings: TopologyTolerance = settings.get("topology_tolerance") match {
-      case None => AllTolerance()
-      case Some("all") => AllTolerance()
-      case Some("none") => NoneTolerance()
-      case Some("same") => SameTolerance()
-      case _ => AllTolerance()
+    val toleranceSettings: TopologyTolerance = if (controllerName != AllControllers()) {
+      settings.get("topology_tolerance") match {
+        case Some("all") => AllTolerance()
+        case Some("none") => NoneTolerance()
+        case Some("same") => SameTolerance()
+        case _ => AllTolerance()
+      }
+    } else {
+      AllTolerance()
     }
 
     val strategy = settings.get("strategy")

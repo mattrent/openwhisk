@@ -555,6 +555,15 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
      * @return an invoker to schedule to or None of no invoker is available
      */
 
+    /* TODO:
+        - outer strategy still the same
+        - block-level strategy selects:
+            - between "wrk:" tags with normal strategy behaviour
+            - betweek "set:" tags with outer strategy behaviour (unclear how "platform" should work) => selects between different "set:" tags
+        - "set:" tag strategy works normally => "best-first" works as "platform"
+        - invalidate now overrides, both in "wrk:" and "set:" tags
+        - block-level invalidate is the default value for "set:" and "wrk:" tags
+     */
     def schedule(
                   action: ExecutableWhiskActionMetaData,
                   msg: ActivationMessage,
