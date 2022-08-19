@@ -23,7 +23,7 @@ case class WorkerName(
 sealed trait Workers
 case class WorkerSet(labels: List[WorkerLabel]) extends Workers
 case class WorkerList(names: List[WorkerName]) extends Workers
-case class All() extends Invokers
+case class All() extends Workers
 
 sealed trait ControllerSettings
 case class ControllerName(name: String) extends ControllerSettings
@@ -46,7 +46,7 @@ case class NoneTolerance() extends TopologyTolerance
    The returned object must be a map; since tags are a list now, it must be converted from [{"a":{}}, {"b":{}}] to {"a":{}, "b":{}}
  */
 case class BlockSettings(
-  controller: ControllerSetting,
+  controller: ControllerSettings,
   topology_tolerance: TopologyTolerance,
   strategy: Option[String],
   maxCapacity: Option[Int],
@@ -78,7 +78,7 @@ case class ConfigurableLBSettings(settings : Map[String, TagSettings]) {
 
 object LBControlParser {
 
-  def logIntoContainer(msg: String) = {
+  def logIntoContainer(msg: String): Any = {
     val fw = new FileWriter("parserLogs.txt", true)
     try {
       fw.append(s"$msg\n")
@@ -101,29 +101,33 @@ object LBControlParser {
     }
   }
 
-  private def parseWorkersSettings(workerSettings: Option[Any]) : Invokers = {
+  private def parseWorkersSettings(workerSettings: Option[Any]) : Workers = {
     logIntoContainer("PARSING INVOKERS")
     logIntoContainer(s"$workerSettings")
 
-    val invokersList = invokerSettings match {
+    val invokersList = workerSettings match {
       case None => throw new Exception("Invalid configuration file: mandatory workers key missing")
       case Some(settingsList) =>
         logIntoContainer(s"$settingsList")
         val list = settingsList.asInstanceOf[util.ArrayList[Map[Any, Any]]].asScala.toList
         logIntoContainer(s"$list")
         val first = list.head
-        if (first)
-          InvokerList(list.asInstanceOf[List[String]])
-        else
-          InvokerLabels(
-            list.map(
-              e => {
-                val _e = e.asInstanceOf[util.HashMap[String, String]].asScala.toMap
-                val _invalidate: Map[String, Int] = parseInvalidate(_e.get("invalidate"))
-                InvokerLabel(_e.getOrElse("label", "*"), _e.get("strategy"), _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
-              }
+        if (first.contains("wrk")) {
+//          TODO: parse worker list and worker set
+          WorkerList(list.asInstanceOf[List[String]])
+        }
+        else if (first.contains("set")) {
+            WorkerLabel(
+              list.map(
+                e => {
+                  val _e = e.asInstanceOf[util.HashMap[String, String]].asScala.toMap
+                  val _invalidate: Map[String, Int] = parseInvalidate(_e.get("invalidate"))
+                  WorkerLabel(_e.getOrElse("label", "*"), _e.get("strategy"), _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
+                }
+              )
             )
-          )
+          }
+        else throw new RuntimeException("Invalid configuration file: mandatory wrk or set keys")
 
     }
     logIntoContainer(s"$invokersList")
@@ -159,7 +163,7 @@ object LBControlParser {
 
     val invalidate: Map[String, Int] = parseInvalidate(settings.get("invalidate"))
 
-    val invokerSettings = parseInvokersSettings(settings.get("workers"))
+    val invokerSettings = parseWorkersSettings(settings.get("workers"))
 
     BlockSettings(controllerName, toleranceSettings, strategySettings, invalidate.get("capacity_used"), invalidate.get("max_concurrent_invocations"), invokerSettings)
   }
