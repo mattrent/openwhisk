@@ -34,17 +34,6 @@ case class AllTolerance() extends TopologyTolerance
 case class SameTolerance() extends TopologyTolerance
 case class NoneTolerance() extends TopologyTolerance
 
-/* TODO:
-    - no more "block" keyword
-    - "wrk:" and "set:" for single/multiple workers
-    - no more "*" for all workers (now null is the "all" value)
-    - no more "*" for all controllers (omitting the "controller" value sets it as "all")
-    - tags are now a list
-
-   BlockSettings pretty much the same as before (doesn't need "blocks" keyword, simply a list)
-
-   The returned object must be a map; since tags are a list now, it must be converted from [{"a":{}}, {"b":{}}] to {"a":{}, "b":{}}
- */
 case class BlockSettings(
   controller: ControllerSettings,
   topology_tolerance: TopologyTolerance,
@@ -109,24 +98,33 @@ object LBControlParser {
       case None => throw new Exception("Invalid configuration file: mandatory workers key missing")
       case Some(settingsList) =>
         logIntoContainer(s"$settingsList")
-        val list = settingsList.asInstanceOf[util.ArrayList[Map[Any, Any]]].asScala.toList
+        val list = settingsList.asInstanceOf[util.ArrayList[util.HashMap[Any, Any]]].asScala.toList
         logIntoContainer(s"$list")
-        val first = list.head
+        val first = list.head.asScala.toMap
         if (first.contains("wrk")) {
-//          TODO: parse worker list and worker set
-          WorkerList(list.asInstanceOf[List[String]])
+          // we are scanning a worker name list
+          val names = list.map(rawElement => {
+            val element = rawElement.asScala.toMap
+            val _invalidate = parseInvalidate(element.get("invalidate"))
+            WorkerName(element.get("wrk").get.toString, _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
+          })
+          WorkerList(names)
         }
         else if (first.contains("set")) {
-            WorkerLabel(
-              list.map(
-                e => {
-                  val _e = e.asInstanceOf[util.HashMap[String, String]].asScala.toMap
-                  val _invalidate: Map[String, Int] = parseInvalidate(_e.get("invalidate"))
-                  WorkerLabel(_e.getOrElse("label", "*"), _e.get("strategy"), _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
-                }
-              )
-            )
-          }
+          // we are scanning a worker label set
+          val names = list.map(rawElement => {
+            val element = rawElement.asScala.toMap
+            val _invalidate = parseInvalidate(element.get("invalidate"))
+            val _strategy = element.get("strategy").map(_.toString)
+            val _set = element.get("set") match {
+              case Some(null) => "*"
+              case Some(s) => s.toString
+              case None => "*"
+            }
+            WorkerLabel(_set, _strategy , _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
+          })
+          WorkerSet(names)
+        }
         else throw new RuntimeException("Invalid configuration file: mandatory wrk or set keys")
 
     }
@@ -168,22 +166,21 @@ object LBControlParser {
     BlockSettings(controllerName, toleranceSettings, strategySettings, invalidate.get("capacity_used"), invalidate.get("max_concurrent_invocations"), invokerSettings)
   }
 
-  private def parseTagSettings(tag : (String, Any)) : (String, TagSettings) = {
+  private def parseTagSettings(tag : (String, Map[String, Any])) : (String, TagSettings) = {
+    val settings: Map[String, Any] = tag._2
     val tagName = tag._1
     logIntoContainer(s"PARSING TAG $tagName")
 
-    val settings: Map[String, Any] = tag._2.asInstanceOf[util.HashMap[String, Any]].asScala.toMap
-
     logIntoContainer(s"${tag._2}")
 
-    val blocks: List[Any] = settings.get("blocks") match {
+    val blocks: List[Any] = settings.get("blocks").get match {
       case None => List[Any]()
       case Some(b) => b.asInstanceOf[util.ArrayList[Any]].asScala.toList
     }
     val blockSettings: List[BlockSettings] = blocks.map(parseBlockSettings)
 
-    val followUp = settings.get("followup")
-    val strategy = settings.get("strategy")
+    val followUp = settings.get("followup").get
+    val strategy = settings.get("strategy").get
 
     val followUpSettings: Option[String] = followUp match {
       case None => None
@@ -203,9 +200,32 @@ object LBControlParser {
   }
 
   def parseConfigurableLBSettings(configurationYAMLText : String) : ConfigurableLBSettings = {
-    val parsedYaml: Map[String, Any] = new Yaml().load[util.HashMap[String, Any]](configurationYAMLText).asScala.toMap
+    /*
+    The base YAML produces the following shape:
+    [{"tagName": [], "strategy": _, "followup": _}, ...]
 
-    logIntoContainer(parsedYaml.toString)
+    The object is then mapped to:
+    {"tagName": {"blocks":[], "strategy": _, "followup": _}, ...}
+     */
+    val baseParsedYaml: util.ArrayList[util.HashMap[String, Any]] = new Yaml().load[
+      util.ArrayList[util.HashMap[String, Any]]
+    ](configurationYAMLText)
+
+    val parsedYaml: Map[String, Map[String, Any]] = baseParsedYaml.asScala.toList.map(rawElement => {
+      val element = rawElement.asScala.toMap
+      // the tag name is the only key that is both not "strategy" nor "followup"
+      val tagName: String = element.keys.filter(k => k != "strategy" && k != "followup").head
+      // the block list is the array identified by the tagName key
+      val innerMap: Map[String, Any] = Map.apply(
+        ("strategy", element.get("strategy")),
+        ("followup", element.get("followup")),
+        ("blocks", element.get(tagName))
+      )
+      tagName -> innerMap
+    }).toMap
+
+    logIntoContainer(s"Base parsed YAML: ${baseParsedYaml.toString}")
+    logIntoContainer(s"Parsed YAML: ${parsedYaml.toString}")
 
     ConfigurableLBSettings(parsedYaml.map(parseTagSettings))
   }
