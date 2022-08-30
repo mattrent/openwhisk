@@ -28,11 +28,13 @@ import org.apache.openwhisk.spi.SpiLoader
 import java.io.FileNotFoundException
 import scala.annotation.tailrec
 import scala.concurrent.{Await, Future}
-import scala.concurrent.duration.{FiniteDuration}
+import scala.concurrent.duration.FiniteDuration
 import scala.io.Source
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import spray.json.JsonParser.ParsingException
+
+import java.util.concurrent.ThreadLocalRandom
 
 
 class ConfigurableLoadBalancer(
@@ -487,6 +489,58 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
 
     def requiredProperties: Map[String, String] = kafkaHosts
 
+
+    /* Modified schedule function taken from ShardingContainerPoolBalancer, to allow worker-wise invalidation options */
+    @tailrec
+    def modifiedDefaultSchedule(
+                  action: ExecutableWhiskActionMetaData,
+                  fqn: FullyQualifiedEntityName,
+                  invokers: IndexedSeq[InvokerHealth],
+                  dispatched: IndexedSeq[NestedSemaphore[FullyQualifiedEntityName]],
+                  invalidateMap: Map[String, (Int, Int)],
+                  maxCap: Option[Int],
+                  maxCon: Option[Int],
+                  index: Int,
+                  step: Int,
+                  stepsDone: Int = 0)(implicit logging: Logging, transId: TransactionId): Option[(InvokerInstanceId, Boolean)] = {
+      val numInvokers = invokers.size
+
+      if (numInvokers > 0) {
+        val invoker = invokers(index)
+        //test this invoker - if this action supports concurrency, use the scheduleConcurrent function
+        val invokerInvalidate = invalidateMap.get(invoker.id.uniqueName.getOrElse("")).getOrElse(
+          maxCap.getOrElse(action.limits.memory.megabytes),
+          maxCon.getOrElse(action.limits.concurrency.maxConcurrent)
+        )
+        if (invoker.status.isUsable && dispatched(invoker.id.toInt).tryAcquireConcurrent(fqn, invokerInvalidate._2, invokerInvalidate._1)) {
+          Some(invoker.id, false)
+        } else {
+          // If we've gone through all invokers
+          if (stepsDone == numInvokers + 1) {
+            val healthyInvokers = invokers.filter(_.status.isUsable)
+            if (healthyInvokers.nonEmpty) {
+              // Choose a healthy invoker randomly
+              val random = healthyInvokers(ThreadLocalRandom.current().nextInt(healthyInvokers.size))
+              val invokerInvalidate = invalidateMap.get(random.id.uniqueName.getOrElse("")).getOrElse(
+                maxCap.getOrElse(action.limits.memory.megabytes),
+                maxCon.getOrElse(action.limits.concurrency.maxConcurrent)
+              )
+              dispatched(random.id.toInt).forceAcquireConcurrent(fqn, invokerInvalidate._2, invokerInvalidate._1)
+              logging.warn(this, s"system is overloaded. Chose invoker${random.id.toInt} by random assignment.")
+              Some(random.id, true)
+            } else {
+              None
+            }
+          } else {
+            val newIndex = (index + step) % numInvokers
+            modifiedDefaultSchedule(action, fqn, invokers, dispatched, invalidateMap, maxCap, maxCon, newIndex, step, stepsDone + 1)
+          }
+        }
+      } else {
+        None
+      }
+    }
+
     def defaultSchedule(
                          action: ExecutableWhiskActionMetaData,
                          msg: ActivationMessage,
@@ -494,20 +548,23 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                          sameZoneInvokers: IndexedSeq[InvokerHealth],
                          dispatched: IndexedSeq[NestedSemaphore[FullyQualifiedEntityName]],
                          stepSizes: Seq[Int],
-                         maxC: Option[Int],
-                         maxF: Option[Int]
+                         invalidateMap: Map[String, (Int, Int)],
+                         maxCap: Option[Int],
+                         maxCon: Option[Int]
                        )(implicit logging: Logging, transId: TransactionId): Option[(InvokerInstanceId, Boolean)] = {
         val hash = ShardingContainerPoolBalancer.generateHash(msg.user.namespace.name, action.fullyQualifiedName(false))
         val stepSize = stepSizes(hash % stepSizes.size)
 
         val invoker = if (sameZoneInvokers.size > 0) {
             val homeInvoker = hash % sameZoneInvokers.size
-            ShardingContainerPoolBalancer.schedule(
-                maxF.getOrElse(action.limits.concurrency.maxConcurrent),
+            modifiedDefaultSchedule(
+                action,
                 action.fullyQualifiedName(true),
                 sameZoneInvokers,
                 dispatched,
-                maxC.getOrElse(action.limits.memory.megabytes),
+                invalidateMap,
+                maxCap,
+                maxCon,
                 homeInvoker,
                 stepSize)
         } else None
@@ -515,12 +572,14 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
         val chosenInvoker = invoker match {
             case None =>
                 val newHomeInvoker = hash % invokers.size
-                ShardingContainerPoolBalancer.schedule(
-                    maxF.getOrElse(action.limits.concurrency.maxConcurrent),
+                modifiedDefaultSchedule(
+                    action,
                     action.fullyQualifiedName(true),
                     invokers,
                     dispatched,
-                    maxC.getOrElse(action.limits.memory.megabytes),
+                    invalidateMap,
+                    maxCap,
+                    maxCon,
                     newHomeInvoker,
                     stepSize)
             case _ => invoker
@@ -556,13 +615,13 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
      */
 
     /* TODO:
-        - outer strategy still the same
+        - outer strategy still the same ~
         - block-level strategy selects:
-            - between "wrk:" tags with normal strategy behaviour
-            - betweek "set:" tags with outer strategy behaviour (unclear how "platform" should work) => selects between different "set:" tags
+            - between "wrk:" tags with normal strategy behaviour ~
+            - betweek "set:" tags with outer strategy behaviour (unclear how "platform" should work) => selects between different "set:" tags ~
         - "set:" tag strategy works normally => "best-first" works as "platform"
-        - invalidate now overrides, both in "wrk:" and "set:" tags
-        - block-level invalidate is the default value for "set:" and "wrk:" tags
+        - invalidate now overrides, both in "wrk:" and "set:" tags ~
+        - block-level invalidate is the default value for "set:" and "wrk:" tags ~
      */
     def schedule(
                   action: ExecutableWhiskActionMetaData,
@@ -583,22 +642,31 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
 
         //TODO: generalize bestFirst/random/byStrategy scheduling to both blocks and workers
         @tailrec
-        def bestFirstSchedule(specifiedInvokers: List[InvokerHealth], maxC: Option[Int], maxF: Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
+        def bestFirstSchedule(specifiedInvokers: List[InvokerHealth],
+                              invalidateMap: Map[String, (Int, Int)],
+                              maxCap: Option[Int],
+                              maxCon: Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
             specifiedInvokers match {
                 case IndexedSeq() => None
                 case (x: InvokerHealth) :: xs =>
+                    val invokerInvalidate = invalidateMap.get(x.id.uniqueName.getOrElse("")).getOrElse(
+                      maxCap.getOrElse(slots),
+                      maxCon.getOrElse(maxConcurrent)
+                    )
                     if (dispatched(x.id.toInt).tryAcquireConcurrent(
-                        fqn, maxF.getOrElse(maxConcurrent), maxC.getOrElse(slots)
+                        fqn, invokerInvalidate._2, invokerInvalidate._1
                     ))
                         Some(x.id, false)
                     else
-                        bestFirstSchedule(xs, maxC, maxF)
+                        bestFirstSchedule(xs, invalidateMap, maxCap, maxCon)
             }
         }
 
         @tailrec
         def randomSchedule(specifiedInvokers:  IndexedSeq[InvokerHealth],
-                           maxC : Option[Int], maxF : Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
+                           invalidateMap: Map[String, (Int, Int)],
+                           maxCap: Option[Int],
+                           maxCon: Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
             def getRandomIndex = {
                 val rand = scala.util.Random
                 val rIndex = rand.nextInt(specifiedInvokers.length)
@@ -609,14 +677,18 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                 case (_ : InvokerHealth) +: _ =>
                     val rIndex = getRandomIndex
                     val x = specifiedInvokers(rIndex)
+                    val invokerInvalidate = invalidateMap.get(x.id.uniqueName.getOrElse("")).getOrElse(
+                      maxCap.getOrElse(slots),
+                      maxCon.getOrElse(maxConcurrent)
+                    )
                     logging.info(this, s"ConfigurableLB: Random scheduling chosen... number of invokers: ${specifiedInvokers.length} index chosen: $rIndex")
                     logging.info(this, s"ConfigurableLB: Chosen invoker: ${x}; Chosen invoker InstanceId: ${x.id}; Chosen invoker tags: ${x.id.tags}")
                     if (dispatched(x.id.toInt).tryAcquireConcurrent(
-                        fqn, maxF.getOrElse(maxConcurrent), maxC.getOrElse(slots)
+                      fqn, invokerInvalidate._2, invokerInvalidate._1
                     ))
                         Some(x.id, false)
                     else
-                        randomSchedule(specifiedInvokers.take(rIndex - 1) ++ specifiedInvokers.drop(rIndex), maxC, maxF )
+                        randomSchedule(specifiedInvokers.take(rIndex - 1) ++ specifiedInvokers.drop(rIndex), invalidateMap, maxCap, maxCon)
             }
 
         }
@@ -624,48 +696,66 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
         def scheduleByStrategy(specifiedInvokers: IndexedSeq[InvokerHealth],
                                sameZoneInvokers: IndexedSeq[InvokerHealth],
                                strategy: Option[String],
-                               maxC: Option[Int],
-                               maxF: Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
+                               invalidateMap: Map[String, (Int, Int)],
+                               maxCap: Option[Int],
+                               maxCon: Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
             strategy match {
-                case None => defaultSchedule(action, msg, specifiedInvokers, sameZoneInvokers, dispatched, stepSizes, maxC, maxF)
-                case Some("best-first") => bestFirstSchedule(specifiedInvokers.toList, maxC, maxF)
+                case None => defaultSchedule(action, msg, specifiedInvokers, sameZoneInvokers, dispatched, stepSizes, invalidateMap, maxCap, maxCon)
+                case Some("best-first") => bestFirstSchedule(specifiedInvokers.toList, invalidateMap, maxCap, maxCon)
                 case Some("random") =>
-                    val randomSameZone = randomSchedule(sameZoneInvokers, maxC, maxF)
+                    val randomSameZone = randomSchedule(sameZoneInvokers, invalidateMap, maxCap, maxCon)
                     randomSameZone match {
                         case None =>
                             logging.info(this, s"ConfigurableLB: Random scheduling found no invoker in same topological zone. Proceeding with normal random scheduling.")
-                            randomSchedule(specifiedInvokers, maxC, maxF)
+                            randomSchedule(specifiedInvokers, invalidateMap, maxCap, maxCon)
                         case _ => randomSameZone
                     }
-                case Some("platform") => defaultSchedule(action, msg, specifiedInvokers, sameZoneInvokers, dispatched, stepSizes, maxC, maxF)
+                case Some("platform") => defaultSchedule(action, msg, specifiedInvokers, sameZoneInvokers, dispatched, stepSizes, invalidateMap, maxCap, maxCon)
                 case _ => throw new Exception("No strategy found")
             }
         }
 
         def scheduleOnInvokerLabels(
                                      healthyInvokers: IndexedSeq[InvokerHealth],
-                                     labels: List[InvokerLabel],
+                                     sameZoneInvokers: IndexedSeq[InvokerHealth],
+                                     sets: List[WorkerSet],
                                      blockStrategy: Option[String],
-                                     blockMaxC: Option[Int],
-                                     blockMaxF: Option[Int],
                                    ): Option[(InvokerInstanceId, Boolean)] = {
-            labels match {
+            // platform has no meaning in this selection, so it's either random or best-first
+            val strategy = blockStrategy match {
+              case Some("random") => "random"
+              case _ => "best-first"
+            }
+            sets match {
                 case List() => None
-                case l :: ls =>
-                    val pattern = """(\*)([\w-_]+)?""".r
-                    val cInvokers = l.label match {
-                        case pattern("*", null) => healthyInvokers
-                        case pattern("*", s) =>
-                            logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s}")
-                            filterInvokers(healthyInvokers, Some(s), nodeLabelMap)
-                        case _ => healthyInvokers
+                case (l : WorkerSet) :: ls =>
+                    //depending on the strategy, we change the actual set being used, as well as the recursive cal
+                    val (currentSet, currentIndex) = if (strategy == "best-first") {
+                      (l, 0)
+                    } else {
+                      val rand = scala.util.Random
+                      val rIndex = rand.nextInt(sets.length)
+                      (sets(rIndex), rIndex)
                     }
-                    logging.info(this, s"ConfigurableLB: choosing from invoker label ${l.label}; filtered invokers: ${cInvokers}")
-                    val strategy = l.strategy.orElse(blockStrategy)
-                    val maxCapacity = l.maxCapacity.orElse(blockMaxC)
-                    val maxConcurrentInvocations = l.maxConcurrentInvocations.orElse(blockMaxF)
-                    val chosenInvoker = scheduleByStrategy(cInvokers, IndexedSeq.empty[InvokerHealth], strategy, maxCapacity, maxConcurrentInvocations)
-                    chosenInvoker.orElse(scheduleOnInvokerLabels(healthyInvokers, ls, blockStrategy, blockMaxC, blockMaxF))
+
+                    val cInvokers = currentSet.label match {
+                      case WorkerAll() => healthyInvokers
+                      case WorkerSubset(s) =>
+                        logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s}")
+                        filterInvokers(healthyInvokers, Some(s), nodeLabelMap)
+                      case _ => healthyInvokers
+                    }
+                    logging.info(this, s"ConfigurableLB: choosing from invoker label ${currentSet.label}; filtered invokers: ${cInvokers}")
+                    val maxCap = currentSet.maxCapacity.getOrElse(slots)
+                    val maxCon = currentSet.maxConcurrentInvocations.getOrElse(maxConcurrent)
+                    // we use the strategy specified in the subset to schedule on it; if not specified, the strategy is "platform"
+                    val chosenInvoker = scheduleByStrategy(cInvokers, IndexedSeq.empty[InvokerHealth], currentSet.strategy, Map.empty[String, (Int, Int)], Some(maxCap), Some(maxCon))
+
+                    if (strategy == "best-first") {
+                      chosenInvoker.orElse(scheduleOnInvokerLabels(healthyInvokers, sameZoneInvokers, ls, blockStrategy))
+                    } else {
+                      chosenInvoker.orElse(scheduleOnInvokerLabels(healthyInvokers, sameZoneInvokers, sets.take(currentIndex - 1) ++ sets.drop(currentIndex), blockStrategy))
+                    }
             }
         }
 
@@ -674,16 +764,25 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                                       sameZoneInvokers: IndexedSeq[InvokerHealth],
                                       blockSettings: BlockSettings): Option[(InvokerInstanceId, Boolean)] = {
             logging.info(this, "ConfigurableLB: scheduleOnSpecifiedBlock with settings: " + blockSettings + " and healthy invokers: " + healthyInvokers.map(i => i.id))
-            blockSettings.invokersSettings match {
-                case InvokerList(names) =>
-                    val cInvokers = healthyInvokers.filter(i => names.contains(i.id.uniqueName.getOrElse("")))
-                    if (cInvokers.isEmpty) None
-                    //empty list for sameZoneInvokers, as we do not prioritize workers in the same topological zone when a list is explicitly specified
-                    else scheduleByStrategy(cInvokers, IndexedSeq.empty[InvokerHealth], blockSettings.strategy, blockSettings.maxCapacity, blockSettings.maxConcurrentInvocations)
-                case InvokerLabels(labels) =>
-                    scheduleOnInvokerLabels(healthyInvokers, labels, blockSettings.strategy, blockSettings.maxCapacity, blockSettings.maxConcurrentInvocations)
-                case All() =>
-                    scheduleByStrategy(healthyInvokers, sameZoneInvokers, blockSettings.strategy, blockSettings.maxCapacity, blockSettings.maxConcurrentInvocations)
+            blockSettings.workersSettings match {
+                case WorkerList(workers) =>
+                  val workerNames = workers.map(_.label)
+                  val cInvokers = healthyInvokers.filter(i => workerNames.contains(i.id.uniqueName.getOrElse("")))
+                  if (cInvokers.isEmpty) None
+                  //empty list for sameZoneInvokers, as we do not prioritize workers in the same topological zone when a list is explicitly specified
+                  else {
+                    val invalidateMap = workers.map(w => {
+                      val maxCap = w.maxCapacity.orElse(blockSettings.maxCapacity).getOrElse(slots)
+                      val maxCon = w.maxConcurrentInvocations.orElse(blockSettings.maxConcurrentInvocations).getOrElse(maxConcurrent)
+                      w.label -> (maxCap, maxCon)
+                    }).toMap
+                    /* we use the strategy specified in the block to schedule between single workers
+                     * (unlike with WorkerSet, where the strategy selects between them, while the worker selection is done with the WorkerSet strategy)
+                     */
+                    scheduleByStrategy(cInvokers, IndexedSeq.empty[InvokerHealth], blockSettings.strategy, invalidateMap, None, None)
+                  }
+                case WorkerSetList(labels) =>
+                    scheduleOnInvokerLabels(healthyInvokers, sameZoneInvokers, labels, blockSettings.strategy)
             }
         }
 
@@ -714,7 +813,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                         case None =>
                             logging.info(this, "ConfigurableLB: invocation without default and tag, fall back to default invocation.")
                             logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
-                            defaultSchedule(action, msg, invokers, sameZoneInvokers, dispatched, stepSizes, None, None)
+                            defaultSchedule(action, msg, invokers, sameZoneInvokers, dispatched, stepSizes, Map.empty[String, (Int, Int)], None, None)
                         case Some(ts) =>
                             /* if a default tag is defined, we can simply return None and have the publish() method handle the default invocation (and potential propagation) */
                             None
