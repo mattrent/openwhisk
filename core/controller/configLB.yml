@@ -1,6 +1,8 @@
 - default:
   - workers:
     - wrk: "kube-node3"
+      invalidate:
+        - max_concurrent_invocations: 50
     - wrk: "kube-node2"
     strategy: platform
     invalidate:
@@ -23,11 +25,13 @@
     workers:
     - set: "kube-label3"
       strategy: random
+      invalidate:
+        - capacity_used: 30
     - set: "kube-label2"
       strategy: platform
     - set:
       strategy: random
     topology_tolerance: "none"
-    strategy: platform
+    strategy: best-first
   strategy: random
   followup: default

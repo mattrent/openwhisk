@@ -7,8 +7,14 @@ import org.yaml.snakeyaml.Yaml
 
 import scala.collection.JavaConverters._
 
-case class WorkerLabel(
-  label: String,
+
+sealed trait WorkerLabel
+
+case class WorkerAll() extends WorkerLabel
+case class WorkerSubset(s: String) extends WorkerLabel
+
+case class WorkerSet(
+  label: WorkerLabel,
   strategy: Option[String],
   maxCapacity: Option[Int],
   maxConcurrentInvocations: Option[Int]
@@ -21,9 +27,8 @@ case class WorkerName(
 )
 
 sealed trait Workers
-case class WorkerSet(labels: List[WorkerLabel]) extends Workers
+case class WorkerSetList(labels: List[WorkerSet]) extends Workers
 case class WorkerList(names: List[WorkerName]) extends Workers
-case class All() extends Workers
 
 sealed trait ControllerSettings
 case class ControllerName(name: String) extends ControllerSettings
@@ -117,13 +122,13 @@ object LBControlParser {
             val _invalidate = parseInvalidate(element.get("invalidate"))
             val _strategy = element.get("strategy").map(_.toString)
             val _set = element.get("set") match {
-              case Some(null) => "*"
-              case Some(s) => s.toString
-              case None => "*"
+              case Some(null) => WorkerAll()
+              case Some(s) => WorkerSubset(s.toString)
+              case None => WorkerAll()
             }
-            WorkerLabel(_set, _strategy , _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
+            WorkerSet(_set, _strategy , _invalidate.get("capacity_used"), _invalidate.get("max_concurrent_invocations"))
           })
-          WorkerSet(names)
+          WorkerSetList(names)
         }
         else throw new RuntimeException("Invalid configuration file: mandatory wrk or set keys")
 
