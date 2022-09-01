@@ -1,33 +1,33 @@
 - default:
   - workers:
-    - wrk: "kube-node3"
+    - wrk: "worker3"
       invalidate:
         - max_concurrent_invocations: 50
-    - wrk: "kube-node2"
+    - wrk: "worker2"
     strategy: platform
     invalidate:
       - max_concurrent_invocations: 100
       - capacity_used: 50
   - workers:
-    - wrk: "kube-node3"
-    - wrk: "kube-node2"
+    - wrk: "worker3"
+    - wrk: "worker2"
     strategy: random
   - workers:
-    - wrk: "kube-node2"
+    - wrk: "worker2"
   strategy: "random"
 - mongoDB:
-  - controller: "kube-node4"
+  - controller: "controller2"
     workers:
     - set:
     topology_tolerance: "all"
     strategy: random
-  - controller: "kube-node5"
+  - controller: "controller1"
     workers:
-    - set: "kube-label3"
+    - set: "set1"
       strategy: random
       invalidate:
         - capacity_used: 30
-    - set: "kube-label2"
+    - set: "set2"
       strategy: platform
     - set:
       strategy: random
