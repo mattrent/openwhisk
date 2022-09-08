@@ -569,7 +569,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                 stepSize)
         } else None
 
-        val chosenInvoker = invoker match {
+        val chosenInvoker = if (invokers.size > 0) invoker match {
             case None =>
                 val newHomeInvoker = hash % invokers.size
                 modifiedDefaultSchedule(
@@ -583,7 +583,8 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                     newHomeInvoker,
                     stepSize)
             case _ => invoker
-        }
+        } else None
+      
         logging.info(this, "Invoker chosen with default scheduler!")
         chosenInvoker
     }
