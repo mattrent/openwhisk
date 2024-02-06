@@ -183,7 +183,11 @@ protected[actions] trait PrimitiveActions {
       cause = cause,
       WhiskTracerProvider.tracer.getTraceContext(transid))
 
+    val startTime = System.nanoTime()
     val postedFuture = loadBalancer.publish(action, message)
+    val endTime = System.nanoTime()
+    val elapsedTime = endTime - startTime
+    logging.info(this, s"Elapsed time: $elapsedTime nanoseconds")
 
     postedFuture andThen {
       case Success(_) => transid.finished(this, startLoadbalancer)
