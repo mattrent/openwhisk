@@ -18,7 +18,6 @@
 package org.apache.openwhisk.core.controller.actions
 
 import java.time.{Clock, Instant}
-
 import akka.actor.ActorSystem
 import akka.event.Logging.InfoLevel
 import spray.json.DefaultJsonProtocol._
@@ -46,6 +45,8 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success}
 import pureconfig._
 import pureconfig.generic.auto._
+
+import java.io.FileWriter
 
 protected[actions] trait PrimitiveActions {
   /** The core collections require backend services to be injected in this trait. */
@@ -187,7 +188,18 @@ protected[actions] trait PrimitiveActions {
     val postedFuture = loadBalancer.publish(action, message)
     val endTime = System.nanoTime()
     val elapsedTime = endTime - startTime
-    logging.info(this, s"Elapsed time: $elapsedTime nanoseconds")
+
+    val fw = new FileWriter("timetoschedule.txt", true)
+    try {
+      fw.append(s"Time to schedule (ns): $elapsedTime")
+    }
+    catch {
+      case e: Throwable => println(e)
+    }
+    finally {
+      fw.close()
+    }
+
 
     postedFuture andThen {
       case Success(_) => transid.finished(this, startLoadbalancer)
