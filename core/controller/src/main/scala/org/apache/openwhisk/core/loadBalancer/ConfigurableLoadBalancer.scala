@@ -154,10 +154,12 @@ class ConfigurableLoadBalancer(
             else (schedulingState.blackboxInvokers, schedulingState.blackboxStepSizes)
 
         val msgParams = msg.content.toJson.convertTo[Map[String, JsValue]]
-        logging.info(this, s"Msg params: ${msgParams}")
+        logging.info(this, s"Body params: ${msgParams}")
 
         //check possible tag mismatch
         val tag: String = getTag(action.annotations).getOrElse("default")
+        logging.info(this, s"Action annotations: ${tag}")
+
         val invokeTag: String = {
             val tagValue: Option[JsValue] = msgParams.get("tag")
             tagValue match {
