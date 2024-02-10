@@ -339,7 +339,7 @@ class ConfigurableLoadBalancer(
                 case None =>
                     val oldIndexes = List.range(0, ts.blockSettings.length)
                     val idxList = oldIndexes.filter(_ != policyIndex)
-                    if (idxList.length > 0) Some(idxList)
+                    if (idxList.nonEmpty) Some(idxList)
                     else None
                 case Some(List()) =>
                     /* no need to proceed further, the invocation cannot be propagated */
@@ -417,21 +417,14 @@ class ConfigurableLoadBalancer(
     }
 
     def getTag(annotations: Parameters)(implicit logging: Logging, transId: TransactionId): Option[String] = {
-        annotations.get("parameters") match {
-            case Some(json) =>
-                //logging.info(this, s"Converting $json into Tag object...")
-                val t: List[Map[String, JsValue]] = json.convertTo[List[Map[String, JsValue]]]
-                t.find(m => m.contains("tag")) match {
-                    case Some(m) =>
-                        val tag = m("tag")
-                        tag match {
-                            case JsString(x) =>
-                                //logging.info(this, s"Received: $x")
-                                Some(x)
-                            case _ => None
-                        }
-                    case None => None
-                }
+        annotations.get("tag") match {
+            case Some(tag) =>
+              tag match {
+                case JsString(x) =>
+                  //logging.info(this, s"Received: $x")
+                  Some(x)
+                case _ => None
+              }
             case None =>
                 //logging.info(this, "No tag received")
                 None
