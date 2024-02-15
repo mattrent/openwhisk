@@ -8,7 +8,6 @@ import akka.cluster.{Cluster, Member, MemberStatus}
 import akka.http.scaladsl.model.StatusCodes.BadRequest
 import akka.management.scaladsl.AkkaManagement
 import akka.management.cluster.bootstrap.ClusterBootstrap
-import akka.pattern.ask
 import akka.stream.ActorMaterializer
 import akka.util.Timeout
 import org.apache.kafka.clients.producer.RecordMetadata
@@ -25,7 +24,7 @@ import org.apache.openwhisk.spi.SpiLoader
 
 import java.io.FileNotFoundException
 import scala.annotation.tailrec
-import scala.concurrent.{Await, Future}
+import scala.concurrent.Future
 import scala.concurrent.duration.FiniteDuration
 import scala.io.Source
 import spray.json._
