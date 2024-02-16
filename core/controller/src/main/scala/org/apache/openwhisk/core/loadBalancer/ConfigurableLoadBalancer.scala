@@ -687,8 +687,8 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
           val invokerInvalidate = invalidateMap
             .get(x.id.uniqueName.getOrElse(""))
             .getOrElse(maxCap.getOrElse(slots), maxCon.getOrElse(maxConcurrent))
-          //logging.info(this, s"ConfigurableLB: Random scheduling chosen... number of invokers: ${specifiedInvokers.length} index chosen: $rIndex")
-          //logging.info(this, s"ConfigurableLB: Chosen invoker: ${x}; Chosen invoker InstanceId: ${x.id}; Chosen invoker tags: ${x.id.tags}")
+          logging.info(this, s"ConfigurableLB: Random scheduling chosen... number of invokers: ${specifiedInvokers.length} index chosen: $rIndex")
+          logging.info(this, s"ConfigurableLB: Chosen invoker: ${x}; Chosen invoker InstanceId: ${x.id}; Chosen invoker tags: ${x.id.tags}")
           if (dispatched(x.id.toInt).tryAcquireConcurrent(fqn, invokerInvalidate._2, invokerInvalidate._1))
             Some(x.id, false)
           else
@@ -724,7 +724,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
           val randomSameZone = randomSchedule(sameZoneInvokers, invalidateMap, maxCap, maxCon)
           randomSameZone match {
             case None =>
-              //logging.info(this, s"ConfigurableLB: Random scheduling found no invoker in same topological zone. Proceeding with normal random scheduling.")
+              logging.info(this, s"ConfigurableLB: Random scheduling found no invoker in same topological zone. Proceeding with normal random scheduling.")
               randomSchedule(specifiedInvokers, invalidateMap, maxCap, maxCon)
             case _ => randomSameZone
           }
@@ -768,11 +768,11 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
           val cInvokers = currentSet.label match {
             case WorkerAll()     => healthyInvokers
             case WorkerSubset(s) =>
-              //logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s}")
+              logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s}")
               filterInvokers(healthyInvokers, Some(s), nodeLabelMap)
             case _ => healthyInvokers
           }
-          //logging.info(this, s"ConfigurableLB: choosing from invoker label ${currentSet.label}; filtered invokers: ${cInvokers}")
+          logging.info(this, s"ConfigurableLB: choosing from invoker label ${currentSet.label}; filtered invokers: ${cInvokers}")
           val maxCap = currentSet.maxCapacity.getOrElse(slots)
           val maxCon = currentSet.maxConcurrentInvocations.getOrElse(maxConcurrent)
           // we use the strategy specified in the subset to schedule on it; if not specified, the strategy is "platform"
@@ -800,7 +800,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
     def scheduleOnSpecifiedBlock(healthyInvokers: IndexedSeq[InvokerHealth],
                                  sameZoneInvokers: IndexedSeq[InvokerHealth],
                                  blockSettings: BlockSettings): Option[(InvokerInstanceId, Boolean)] = {
-      //logging.info(this, "ConfigurableLB: scheduleOnSpecifiedBlock with settings: " + blockSettings + " and healthy invokers: " + healthyInvokers.map(i => i.id))
+      logging.info(this, "ConfigurableLB: scheduleOnSpecifiedBlock with settings: " + blockSettings + " and healthy invokers: " + healthyInvokers.map(i => i.id))
       blockSettings.workersSettings match {
         case WorkerList(workers) =>
           val workerNames = workers.map(_.label)
@@ -835,10 +835,10 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
     def scheduleBasedOnTagSettings(healthyInvokers: IndexedSeq[InvokerHealth],
                                    sameZoneInvokers: IndexedSeq[InvokerHealth],
                                    blockSettings: BlockSettings): Option[(InvokerInstanceId, Boolean)] = {
-      //logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings block settings ${blockSettings}")
+      logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings block settings ${blockSettings}")
       val res = scheduleOnSpecifiedBlock(healthyInvokers, sameZoneInvokers, blockSettings)
       //if (res.isDefined)
-      //logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings invoker found! ${res}")
+      logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings invoker found! ${res}")
 
       res
     }
@@ -848,17 +848,17 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
     val currentZone = nodeZoneMap.get(controllerInstance.controllerNodeName)
     lazy val sameZoneInvokers: IndexedSeq[InvokerHealth] = filterInvokers(invokers, currentZone, nodeZoneMap)
 
-    //logging.info(this, s"ConfigurableLB: Scheduling with nodeZoneMap: ${nodeZoneMap}")
+    logging.info(this, s"ConfigurableLB: Scheduling with nodeZoneMap: ${nodeZoneMap}")
     val numInvokers = invokers.size
     if (numInvokers > 0) {
       val healthyInvokers: IndexedSeq[InvokerHealth] = invokers.filter(_.status.isUsable)
-      //logging.info(this, s"ConfigurableLB: tag = $tag with settings $tagSettings and invokers: $invokers")
+      logging.info(this, s"ConfigurableLB: tag = $tag with settings $tagSettings and invokers: $invokers")
       tagSettings match {
         case None =>
           defaultSettings match {
             case None =>
-              //logging.info(this, "ConfigurableLB: invocation without default and tag, fall back to default invocation.")
-              //logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
+              logging.info(this, "ConfigurableLB: invocation without default and tag, fall back to default invocation.")
+              logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
               defaultSchedule(
                 action,
                 msg,
@@ -874,29 +874,29 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
               None
           }
         case Some(ts) =>
-          //logging.info(this, s"ConfigurableLB tagSettings = ${tagSettings}")
-          //logging.info(this, s"Chosen policy index = ${policyIndex}")
+          logging.info(this, s"ConfigurableLB tagSettings = ${tagSettings}")
+          logging.info(this, s"Chosen policy index = ${policyIndex}")
           ts.blockSettings(policyIndex).controller match {
             case AllControllers() =>
-              //logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
+              logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
               scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
 
             case ControllerName(name) =>
               if (name == controllerInstance.controllerNodeName) {
-                //logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
+                logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
                 scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
               } else {
                 ts.blockSettings(0).topology_tolerance match {
                   case AllTolerance() =>
-                    //logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
+                    logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
                     scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
                   case SameTolerance() =>
                     val originalZone = nodeZoneMap.get(name)
                     val originalZoneInvokers = filterInvokers(invokers, originalZone, nodeZoneMap)
-                    //logging.info(this, s"ConfigurableLB: invokers in requested topology zone: $originalZoneInvokers")
+                    logging.info(this, s"ConfigurableLB: invokers in requested topology zone: $originalZoneInvokers")
                     scheduleBasedOnTagSettings(healthyInvokers, originalZoneInvokers, ts.blockSettings(policyIndex))
                   case NoneTolerance() =>
-                    //logging.info(this, s"ConfigurableLB: action invoked in a different controller and topology_tolerance is 'none', failing.")
+                    logging.info(this, s"ConfigurableLB: action invoked in a different controller and topology_tolerance is 'none', failing.")
                     None
                 }
               }
