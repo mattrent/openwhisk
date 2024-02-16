@@ -155,7 +155,7 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
 
     //check possible tag mismatch
     val tag: String = getTag(action.annotations).getOrElse("default")
-    //logging.info(this, s"Action annotations: ${tag}")
+    logging.info(this, s"Action annotations: ${tag}")
 
     val invokeTag: String = {
       val tagValue: Option[JsValue] = msgParams.get("tag")
@@ -196,10 +196,10 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
     }
 
     if (forceRefresh) updateConfig("/data/configLB.yml")
-    //else logging.info(this, s"ConfigurableLB: No configuration refresh was requested, using old config")
+    else logging.info(this, s"ConfigurableLB: No configuration refresh was requested, using old config")
 
     if (tag != "default" && tag != invokeTag) {
-      //logging.info(this, s"Tag mismatch in invocation (stored: $tag, provided: $invokeTag)")
+      logging.info(this, s"Tag mismatch in invocation (stored: $tag, provided: $invokeTag)")
       Future.failed(RejectRequest(BadRequest, "Tag mismatch in invocation"))
     } else {
       val actionTag = if (tag != invokeTag) invokeTag else tag
@@ -208,7 +208,7 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
 
       val configurableLBSettings: ConfigurableLBSettings = schedulingState.configurableLBSettings
 
-      //logging.info(this, "choosing invoker...")
+      logging.info(this, "choosing invoker...")
       val chosen = if (invokersToUse.nonEmpty) {
         val invoker: Option[(InvokerInstanceId, Boolean)] = ConfigurableLoadBalancer
           .schedule(
@@ -230,12 +230,13 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
                     if no invoker is found, we try to propagate the invocation according to the block settings;
                     this can still return None, causing the overall invocation to fail
            */
-//                  .orElse({
-//                      //logging.info(this, "ConfigurableLB: no invoker found, propagating invocation")
+                  .orElse({
+                      logging.info(this, "ConfigurableLB: no invoker found, propagating invocation")
+            None
 //                      propagateInvocation(action, msg, transid, policyIndex, actionTag, None)
-//                  })
+                  })
           .orElse({
-            //logging.info(this, "ConfigurableLB: propagation failed, trying followup options")
+            logging.info(this, "ConfigurableLB: propagation failed, trying followup options")
             /* if no tag settings are defined for the given tag, followUp is default;
                         if they are defined, but no followUp is given, followUp is default;
                         if they are defined, and followUp is specified, we use the given string
@@ -245,16 +246,16 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
               configurableLBSettings.getTagSettings(actionTag).map(_.followUp.getOrElse("default"))
             followUp match {
               case None | Some("default") =>
-                //logging.info(this, s"ConfigurableLB: Found followUp $followUp, trying with default")
+                logging.info(this, s"ConfigurableLB: Found followUp $followUp, trying with default")
                 /* policyIndex is -1 because no index has been used yet;
                                 propagateInvocation will fail if no tagSettings are defined for the "default" tag
                  */
                 propagateInvocation(action, msg, transid, -1, "default", None)
               case Some("fail") =>
-                //logging.info(this, s"ConfigurableLB: No compatible invokers found and followup is fail. Can't invoke action!")
+                logging.info(this, s"ConfigurableLB: No compatible invokers found and followup is fail. Can't invoke action!")
                 None
               case Some(s) =>
-                //logging.info(this, s"ConfigurableLB: Wrong followup information ${s}, failing")
+                logging.info(this, s"ConfigurableLB: Wrong followup information ${s}, failing")
                 None
             }
 
@@ -290,9 +291,9 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
           } else {
             "non-std"
           }
-//                  logging.info(
-//                      this,
-//                      s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}")
+                  logging.info(
+                      this,
+                      s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}")
           val activationResult = setupActivation(msg, action, invoker)
           sendActivationToInvoker(messageProducer, msg, invoker).map(_ => activationResult)
         }
@@ -429,12 +430,12 @@ class ConfigurableLoadBalancer(config: WhiskConfig,
       case Some(tag) =>
         tag match {
           case JsString(x) =>
-            //logging.info(this, s"Received: $x")
+            logging.info(this, s"Received: $x")
             Some(x)
           case _ => None
         }
       case None =>
-        //logging.info(this, "No tag received")
+        logging.info(this, "No tag received")
         None
     }
   }
