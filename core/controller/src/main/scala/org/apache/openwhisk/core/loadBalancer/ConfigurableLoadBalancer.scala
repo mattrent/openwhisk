@@ -737,7 +737,8 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                     val cInvokers = currentSet.label match {
                       case WorkerAll() => healthyInvokers
                       case WorkerSubset(s) =>
-                        logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s}")
+                        logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s} with nodeLabelMap ${nodeLabelMap}")
+                        logging.info(this, s"node Zone Map: ${nodeZoneMap}")
                         filterInvokers(healthyInvokers, Some(s), nodeLabelMap)
                       case _ => healthyInvokers
                     }
@@ -759,7 +760,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                                       healthyInvokers: IndexedSeq[InvokerHealth],
                                       sameZoneInvokers: IndexedSeq[InvokerHealth],
                                       blockSettings: BlockSettings): Option[(InvokerInstanceId, Boolean)] = {
-            logging.info(this, "ConfigurableLB: scheduleOnSpecifiedBlock with settings: " + blockSettings + " and healthy invokers: " + healthyInvokers.map(i => i.id))
+            logging.info(this, "ConfiguraebleLB: scheduleOnSpecifiedBlock with settings: " + blockSettings + " and healthy invokers: " + healthyInvokers.map(i => i.id))
             blockSettings.workersSettings match {
                 case WorkerList(workers) =>
                   val workerNames = workers.map(_.label)
