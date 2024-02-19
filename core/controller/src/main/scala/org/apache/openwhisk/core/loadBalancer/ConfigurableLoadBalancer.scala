@@ -737,9 +737,8 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                     val cInvokers = currentSet.label match {
                       case WorkerAll() => healthyInvokers
                       case WorkerSubset(s) =>
-                        logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s} with nodeLabelMap ${nodeLabelMap}")
-                        logging.info(this, s"node Zone Map: ${nodeZoneMap}")
-                        filterInvokers(healthyInvokers, Some(s), nodeLabelMap)
+                        logging.info(this, s"ConfigurableLB: filtering invokers from ${healthyInvokers} on label ${s} with nodeZoneMap ${nodeZoneMap}")
+                        filterInvokers(healthyInvokers, Some(s), nodeZoneMap)
                       case _ => healthyInvokers
                     }
                     logging.info(this, s"ConfigurableLB: choosing from invoker label ${currentSet.label}; filtered invokers: ${cInvokers}")
