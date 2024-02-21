@@ -787,7 +787,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                                         blockSettings: BlockSettings): Option[(InvokerInstanceId, Boolean)] = {
             //logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings block settings ${blockSettings}")
             val res = scheduleOnSpecifiedBlock(healthyInvokers, sameZoneInvokers, blockSettings)
-            if (res.isDefined)
+            //if (res.isDefined)
                 //logging.info(this, s"ConfigurableLB scheduleBasedOnTagSettings invoker found! ${res}")
 
             res
