@@ -657,6 +657,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                         Some(x.id, false)
                     else
                         bestFirstSchedule(xs, invalidateMap, maxCap, maxCon)
+                case List() => None
             }
         }
 
