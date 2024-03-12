@@ -585,13 +585,16 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
     }
 
 
-    def filterInvokers(invokerList: IndexedSeq[InvokerHealth], label: Option[String], labelMap: Map[String, String]): IndexedSeq[InvokerHealth] = {
+    private def filterInvokers(invokerList: IndexedSeq[InvokerHealth], label: Option[String], labelMap: Map[String, String]) (implicit logging: Logging) : IndexedSeq[InvokerHealth] = {
+        logging.info(this, "Filtering invokers")
         invokerList.filter(
+
             i =>
                 i.id.uniqueName match {
                     case None => false
                     case Some(n) =>
                         val invokerLabel = labelMap.get(n)
+                        logging.info(this, s"Invoker label: $invokerLabel")
                         invokerLabel.isDefined && invokerLabel == label
                 }
         )
@@ -643,7 +646,6 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                               maxCap: Option[Int],
                               maxCon: Option[Int]): Option[(InvokerInstanceId, Boolean)] = {
             specifiedInvokers match {
-                case IndexedSeq() => None
                 case (x: InvokerHealth) :: xs =>
                     val invokerInvalidate = invalidateMap.get(x.id.uniqueName.getOrElse("")).getOrElse(
                       maxCap.getOrElse(slots),
@@ -802,7 +804,9 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
         val numInvokers = invokers.size
         if (numInvokers > 0) {
             val healthyInvokers: IndexedSeq[InvokerHealth] = invokers.filter(_.status.isUsable)
-            logging.info(this, s"ConfigurableLB: tag = $tag with settings $tagSettings and invokers: $invokers")
+            logging.info(this, s"ConfigurableLB: tag = $tag with settings $tagSettings")
+            logging.info(this, s"All invokers: $invokers")
+            logging.info(this, s"Healthy invokers: $healthyInvokers")
             tagSettings match {
                 case None =>
                     defaultSettings match {
@@ -827,7 +831,7 @@ object ConfigurableLoadBalancer extends LoadBalancerProvider {
                                 logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
                                 scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
                             } else {
-                                ts.blockSettings(0).topology_tolerance match {
+                                ts.blockSettings.head.topology_tolerance match {
                                     case AllTolerance() =>
                                         logging.info(this, s"ConfigurableLB: invokers in same topology zone: $sameZoneInvokers")
                                         scheduleBasedOnTagSettings(healthyInvokers, sameZoneInvokers, ts.blockSettings(policyIndex))
