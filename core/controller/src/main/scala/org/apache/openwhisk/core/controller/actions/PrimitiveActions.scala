@@ -192,6 +192,8 @@ protected[actions] trait PrimitiveActions {
     val fw = new FileWriter("timetoschedule.txt", true)
     try {
       fw.append(s"Time to schedule (ns): $elapsedTime\n")
+      fw.append(s"Action: $action\n")
+      fw.append(s"Message: $message\n")
     }
     catch {
       case e: Throwable => println(e)
